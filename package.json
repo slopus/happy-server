@@ -28,10 +28,10 @@
     "yaml": "^2.4.2"
   },
   "dependencies": {
+    "happy-api-client": "file:../happy-api-client",
     "@date-fns/tz": "^1.2.0",
     "@fastify/bearer-auth": "^10.1.1",
     "@fastify/cors": "^10.0.1",
-    "@happy/shared-types": "file:../happy-shared-types",
     "@prisma/client": "^6.11.1",
     "@socket.io/redis-streams-adapter": "^0.2.2",
     "@types/jsonwebtoken": "^9.0.10",

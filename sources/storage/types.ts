@@ -4,7 +4,7 @@ import type {
     SessionMessageContent as SharedSessionMessageContent,
     UpdateBody as SharedUpdateBody,
     UsageReport as SharedUsageReport
-} from '@happy/shared-types';
+} from 'happy-api-client';
 
 declare global {
     namespace PrismaJson {
