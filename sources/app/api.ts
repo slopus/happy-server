@@ -11,40 +11,40 @@ import { onShutdown } from "@/utils/shutdown";
 import { allocateSessionSeq, allocateUserSeq } from "@/services/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { AsyncLock } from "@/utils/lock";
+import { auth } from "@/modules/auth";
+import {
+    EventRouter,
+    ClientConnection,
+    SessionScopedConnection,
+    UserScopedConnection,
+    MachineScopedConnection,
+    RecipientFilter,
+    buildNewSessionUpdate,
+    buildNewMessageUpdate,
+    buildUpdateSessionUpdate,
+    buildUpdateAccountUpdate,
+    buildUpdateMachineUpdate,
+    buildSessionActivityEphemeral,
+    buildMachineActivityEphemeral,
+    buildUsageEphemeral,
+    buildMachineStatusEphemeral
+} from "@/modules/eventRouter";
+import {
+    incrementWebSocketConnection,
+    decrementWebSocketConnection,
+    sessionAliveEventsCounter,
+    machineAliveEventsCounter,
+    websocketEventsCounter,
+    httpRequestsCounter,
+    httpRequestDurationHistogram
+} from "@/modules/metrics";
+import { activityCache } from "@/modules/sessionCache";
 
-
-// Recipient filter types
-type RecipientFilter =
-    | { type: 'all-interested-in-session'; sessionId: string }
-    | { type: 'user-scoped-only' }
-    | { type: 'all-user-authenticated-connections' };
-
-// Connection metadata types
-interface SessionScopedConnection {
-    connectionType: 'session-scoped';
-    socket: Socket;
-    userId: string;
-    sessionId: string;
-}
-
-interface UserScopedConnection {
-    connectionType: 'user-scoped';
-    socket: Socket;
-    userId: string;
-}
-
-interface MachineScopedConnection {
-    connectionType: 'machine-scoped';
-    socket: Socket;
-    userId: string;
-    machineId: string;
-}
-
-type ClientConnection = SessionScopedConnection | UserScopedConnection | MachineScopedConnection;
 
 declare module 'fastify' {
     interface FastifyRequest {
-        user: Account;
+        userId: string;
+        startTime?: number;
     }
     interface FastifyInstance {
         authenticate: any;
@@ -56,14 +56,6 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
     // Configure
     log('Starting API...');
-    const tokenGenerator = await privacyKit.createPersistentTokenGenerator({
-        service: 'handy',
-        seed: process.env.HANDY_MASTER_SECRET!
-    });
-    const tokenVerifier = await privacyKit.createPersistentTokenVerifier({
-        service: 'handy',
-        publicKey: tokenGenerator.publicKey
-    });
 
     // Start API
     const app = fastify({
@@ -82,6 +74,25 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
     app.setSerializerCompiler(serializerCompiler);
     const typed = app.withTypeProvider<ZodTypeProvider>();
 
+    // Add metrics hooks
+    app.addHook('onRequest', async (request, reply) => {
+        request.startTime = Date.now();
+    });
+
+    app.addHook('onResponse', async (request, reply) => {
+        const duration = (Date.now() - (request.startTime || Date.now())) / 1000;
+        const method = request.method;
+        // Use routeOptions.url for the route template, fallback to parsed URL path
+        const route = request.routeOptions?.url || request.url.split('?')[0] || 'unknown';
+        const status = reply.statusCode.toString();
+
+        // Increment request counter
+        httpRequestsCounter.inc({ method, route, status });
+
+        // Record request duration
+        httpRequestDurationHistogram.observe({ method, route, status }, duration);
+    });
+
     // Authentication decorator
     app.decorate('authenticate', async function (request: any, reply: any) {
         try {
@@ -93,85 +104,21 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             }
 
             const token = authHeader.substring(7);
-            const verified = await tokenVerifier.verify(token);
+            const verified = await auth.verifyToken(token);
             if (!verified) {
                 log({ module: 'auth-decorator' }, `Auth failed - invalid token`);
                 return reply.code(401).send({ error: 'Invalid token' });
             }
 
-            // Get user from database
-            const user = await db.account.findUnique({
-                where: { id: verified.user as string }
-            });
-
-            if (!user) {
-                log({ module: 'auth-decorator' }, `Auth failed - user not found: ${verified.user}`);
-                return reply.code(401).send({ error: 'User not found' });
-            }
-
-            log({ module: 'auth-decorator' }, `Auth success - user: ${user.id}`);
-
-            request.user = user;
+            log({ module: 'auth-decorator' }, `Auth success - user: ${verified.userId}`);
+            request.userId = verified.userId;
         } catch (error) {
             return reply.code(401).send({ error: 'Authentication failed' });
         }
     });
 
-    // Send session update to all relevant connections
-    let emitUpdateToInterestedClients = ({
-        event,
-        userId,
-        payload,
-        recipientFilter = { type: 'all-user-authenticated-connections' },
-        skipSenderConnection
-    }: {
-        event: string,
-        userId: string,
-        payload: any,
-        recipientFilter?: RecipientFilter,
-        skipSenderConnection?: ClientConnection
-    }) => {
-        const connections = userIdToClientConnections.get(userId);
-        if (!connections) {
-            log({ module: 'websocket', level: 'warn' }, `No connections found for user ${userId}`);
-            return;
-        }
-
-        for (const connection of connections) {
-            // Skip message echo
-            if (skipSenderConnection && connection === skipSenderConnection) {
-                continue;
-            }
-
-            // Apply recipient filter
-            switch (recipientFilter.type) {
-                case 'all-interested-in-session':
-                    // Send to session-scoped with matching session + all user-scoped
-                    if (connection.connectionType === 'session-scoped') {
-                        if (connection.sessionId !== recipientFilter.sessionId) {
-                            continue;  // Wrong session
-                        }
-                    } else if (connection.connectionType === 'machine-scoped') {
-                        continue;  // Machines don't need session updates
-                    }
-                    // user-scoped always gets it
-                    break;
-
-                case 'user-scoped-only':
-                    if (connection.connectionType !== 'user-scoped') {
-                        continue;
-                    }
-                    break;
-
-                case 'all-user-authenticated-connections':
-                    // Send to all connection types (default behavior)
-                    break;
-            }
-
-            log({ module: 'websocket' }, `Sending ${event} to ${connection.connectionType} connection ${connection.socket.id}`);
-            connection.socket.emit(event, payload);
-        }
-    }
+    // Initialize event router
+    const eventRouter = new EventRouter();
 
     // Auth schema
     typed.post('/v1/auth', {
@@ -201,7 +148,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
         return reply.send({
             success: true,
-            token: await tokenGenerator.new({ user: user.id })
+            token: await auth.createToken(user.id)
         });
     });
 
@@ -240,7 +187,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         });
 
         if (answer.response && answer.responseAccountId) {
-            const token = await tokenGenerator.new({ user: answer.responseAccountId!, extras: { session: answer.id } });
+            const token = await auth.createToken(answer.responseAccountId!, { session: answer.id });
             return reply.send({
                 state: 'authorized',
                 token: token,
@@ -261,7 +208,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             })
         }
     }, async (request, reply) => {
-        log({ module: 'auth-response' }, `Auth response endpoint hit - user: ${request.user?.id || 'NO USER'}, publicKey: ${request.body.publicKey.substring(0, 20)}...`);
+        log({ module: 'auth-response' }, `Auth response endpoint hit - user: ${request.userId}, publicKey: ${request.body.publicKey.substring(0, 20)}...`);
         const publicKey = privacyKit.decodeBase64(request.body.publicKey);
         const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
         if (!isValid) {
@@ -286,7 +233,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         if (!authRequest.response) {
             await db.terminalAuthRequest.update({
                 where: { id: authRequest.id },
-                data: { response: request.body.response, responseAccountId: request.user.id }
+                data: { response: request.body.response, responseAccountId: request.userId }
             });
         }
         return reply.send({ success: true });
@@ -325,7 +272,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         });
 
         if (answer.response && answer.responseAccountId) {
-            const token = await tokenGenerator.new({ user: answer.responseAccountId! });
+            const token = await auth.createToken(answer.responseAccountId!);
             return reply.send({
                 state: 'authorized',
                 token: token,
@@ -360,17 +307,76 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         if (!authRequest.response) {
             await db.accountAuthRequest.update({
                 where: { id: authRequest.id },
-                data: { response: request.body.response, responseAccountId: request.user.id }
+                data: { response: request.body.response, responseAccountId: request.userId }
             });
         }
         return reply.send({ success: true });
+    });
+
+    // OpenAI Realtime ephemeral token generation
+    typed.post('/v1/openai/realtime-token', {
+        preHandler: app.authenticate,
+        schema: {
+            response: {
+                200: z.object({
+                    token: z.string()
+                }),
+                500: z.object({
+                    error: z.string()
+                })
+            }
+        }
+    }, async (request, reply) => {
+        try {
+            // Check if OpenAI API key is configured on server
+            const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+            if (!OPENAI_API_KEY) {
+                return reply.code(500).send({
+                    error: 'OpenAI API key not configured on server'
+                });
+            }
+
+            // Generate ephemeral token from OpenAI
+            const response = await fetch('https://api.openai.com/v1/realtime/sessions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${OPENAI_API_KEY}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model: 'gpt-4o-realtime-preview-2024-12-17',
+                    voice: 'verse',
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`OpenAI API error: ${response.status}`);
+            }
+
+            const data = await response.json() as {
+                client_secret: {
+                    value: string;
+                    expires_at: number;
+                };
+                id: string;
+            };
+
+            return reply.send({
+                token: data.client_secret.value
+            });
+        } catch (error) {
+            log({ module: 'openai', level: 'error' }, 'Failed to generate ephemeral token', error);
+            return reply.code(500).send({
+                error: 'Failed to generate ephemeral token'
+            });
+        }
     });
 
     // Sessions API
     typed.get('/v1/sessions', {
         preHandler: app.authenticate,
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
 
         const sessions = await db.session.findMany({
             where: { accountId: userId },
@@ -387,44 +393,38 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                 agentStateVersion: true,
                 active: true,
                 lastActiveAt: true,
-                messages: {
-                    orderBy: { seq: 'desc' },
-                    take: 1,
-                    select: {
-                        id: true,
-                        seq: true,
-                        content: true,
-                        localId: true,
-                        createdAt: true
-                    }
-                }
+                // messages: {
+                //     orderBy: { seq: 'desc' },
+                //     take: 1,
+                //     select: {
+                //         id: true,
+                //         seq: true,
+                //         content: true,
+                //         localId: true,
+                //         createdAt: true
+                //     }
+                // }
             }
         });
 
         return reply.send({
             sessions: sessions.map((v) => {
-                const lastMessage = v.messages[0];
+                // const lastMessage = v.messages[0];
                 const sessionUpdatedAt = v.updatedAt.getTime();
-                const lastMessageCreatedAt = lastMessage ? lastMessage.createdAt.getTime() : 0;
+                // const lastMessageCreatedAt = lastMessage ? lastMessage.createdAt.getTime() : 0;
 
                 return {
                     id: v.id,
                     seq: v.seq,
                     createdAt: v.createdAt.getTime(),
-                    updatedAt: Math.max(sessionUpdatedAt, lastMessageCreatedAt),
+                    updatedAt: sessionUpdatedAt,
                     active: v.active,
                     activeAt: v.lastActiveAt.getTime(),
                     metadata: v.metadata,
                     metadataVersion: v.metadataVersion,
                     agentState: v.agentState,
                     agentStateVersion: v.agentStateVersion,
-                    lastMessage: lastMessage ? {
-                        id: lastMessage.id,
-                        seq: lastMessage.seq,
-                        localId: lastMessage.localId,
-                        content: lastMessage.content,
-                        createdAt: lastMessageCreatedAt
-                    } : null
+                    lastMessage: null
                 };
             })
         });
@@ -441,7 +441,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { tag, metadata } = request.body;
 
         const session = await db.session.findFirst({
@@ -483,28 +483,8 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             });
             logger.info({ module: 'session-create', sessionId: session.id, userId }, `Session created: ${session.id}`);
 
-            // Create update
-            const updContent: PrismaJson.UpdateBody = {
-                t: 'new-session',
-                id: session.id,
-                seq: session.seq,
-                metadata: session.metadata,
-                metadataVersion: session.metadataVersion,
-                agentState: session.agentState,
-                agentStateVersion: session.agentStateVersion,
-                active: session.active,
-                activeAt: session.lastActiveAt.getTime(),
-                createdAt: session.createdAt.getTime(),
-                updatedAt: session.updatedAt.getTime()
-            };
-
-            // Emit update to connected sockets
-            const updatePayload = {
-                id: randomKeyNaked(12),
-                seq: updSeq,
-                body: updContent,
-                createdAt: Date.now()
-            };
+            // Emit new session update
+            const updatePayload = buildNewSessionUpdate(session, updSeq, randomKeyNaked(12));
             logger.info({
                 module: 'session-create',
                 userId,
@@ -512,8 +492,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                 updateType: 'new-session',
                 updatePayload: JSON.stringify(updatePayload)
             }, `Emitting new-session update to all user connections`);
-            emitUpdateToInterestedClients({
-                event: 'update',
+            eventRouter.emitUpdate({
                 userId,
                 payload: updatePayload,
                 recipientFilter: { type: 'all-user-authenticated-connections' }
@@ -554,7 +533,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { token } = request.body;
 
         try {
@@ -597,7 +576,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { token } = request.params;
 
         try {
@@ -618,7 +597,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
     typed.get('/v1/push-tokens', {
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
 
         try {
             const tokens = await db.accountPushToken.findMany({
@@ -659,9 +638,18 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         }
     }, async (request, reply) => {
         try {
+            const user = await db.account.findUnique({
+                where: { id: request.userId },
+                select: { settings: true, settingsVersion: true }
+            });
+
+            if (!user) {
+                return reply.code(500).send({ error: 'Failed to get account settings' });
+            }
+
             return reply.send({
-                settings: request.user.settings,
-                settingsVersion: request.user.settingsVersion
+                settings: user.settings,
+                settingsVersion: user.settingsVersion
             });
         } catch (error) {
             return reply.code(500).send({ error: 'Failed to get account settings' });
@@ -693,17 +681,30 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { settings, expectedVersion } = request.body;
 
         try {
+            // Get current user data for version check
+            const currentUser = await db.account.findUnique({
+                where: { id: userId },
+                select: { settings: true, settingsVersion: true }
+            });
+
+            if (!currentUser) {
+                return reply.code(500).send({
+                    success: false,
+                    error: 'Failed to update account settings'
+                });
+            }
+
             // Check current version
-            if (request.user.settingsVersion !== expectedVersion) {
+            if (currentUser.settingsVersion !== expectedVersion) {
                 return reply.code(200).send({
                     success: false,
                     error: 'version-mismatch',
-                    currentVersion: request.user.settingsVersion,
-                    currentSettings: request.user.settings
+                    currentVersion: currentUser.settingsVersion,
+                    currentSettings: currentUser.settings
                 });
             }
 
@@ -735,25 +736,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
             // Generate update for connected clients
             const updSeq = await allocateUserSeq(userId);
-            const updContent: PrismaJson.UpdateBody = {
-                t: 'update-account',
-                id: userId,
-                settings: {
-                    value: settings,
-                    version: expectedVersion + 1
-                }
+            const settingsUpdate = {
+                value: settings,
+                version: expectedVersion + 1
             };
 
-            // Send to all user connections
-            emitUpdateToInterestedClients({
-                event: 'update',
+            // Send account update to all user connections
+            const updatePayload = buildUpdateAccountUpdate(userId, settingsUpdate, updSeq, randomKeyNaked(12));
+            eventRouter.emitUpdate({
                 userId,
-                payload: {
-                    id: randomKeyNaked(12),
-                    seq: updSeq,
-                    body: updContent,
-                    createdAt: Date.now()
-                },
+                payload: updatePayload,
                 recipientFilter: { type: 'all-user-authenticated-connections' }
             });
 
@@ -782,7 +774,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { sessionId, startTime, endTime, groupBy } = request.body;
         const actualGroupBy = groupBy || 'day';
 
@@ -914,7 +906,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { sessionId } = request.params;
 
         // Verify session belongs to user
@@ -968,7 +960,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             })
         }
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { id, metadata, daemonState } = request.body;
 
         // Check if machine exists (like sessions do)
@@ -1006,30 +998,23 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     metadata,
                     metadataVersion: 1,
                     daemonState: daemonState || null,
-                    daemonStateVersion: daemonState ? 1 : 0
-                    // active defaults to true in schema
-                    // lastActiveAt defaults to now() in schema
+                    daemonStateVersion: daemonState ? 1 : 0,
+                    // Default to offline - in case the user does not start daemon
+                    active: false,
+                    // lastActiveAt and activeAt defaults to now() in schema
                 }
             });
 
             // Emit update for new machine
             const updSeq = await allocateUserSeq(userId);
-            emitUpdateToInterestedClients({
-                event: 'update',
+            const machineMetadata = {
+                version: 1,
+                value: metadata
+            };
+            const updatePayload = buildUpdateMachineUpdate(newMachine.id, updSeq, randomKeyNaked(12), machineMetadata);
+            eventRouter.emitUpdate({
                 userId,
-                payload: {
-                    id: randomKeyNaked(),
-                    seq: updSeq,
-                    body: {
-                        t: 'update-machine',
-                        machineId: newMachine.id,
-                        metadata: {
-                            version: 1,
-                            value: metadata
-                        }
-                    },
-                    createdAt: Date.now()
-                }
+                payload: updatePayload
             });
 
             return reply.send({
@@ -1053,7 +1038,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
     typed.get('/v1/machines', {
         preHandler: app.authenticate,
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
 
         const machines = await db.machine.findMany({
             where: { accountId: userId },
@@ -1083,7 +1068,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             })
         }
     }, async (request, reply) => {
-        const userId = request.user.id;
+        const userId = request.userId;
         const { id } = request.params;
 
         const machine = await db.machine.findFirst({
@@ -1195,8 +1180,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         serveClient: false // Don't serve the client files
     });
 
-    // Track connections by scope type
-    const userIdToClientConnections = new Map<string, Set<ClientConnection>>();
+    // Connection tracking is now handled by EventRouter
 
     // Track RPC listeners: Map<userId, Map<rpcMethodWithSessionPrefix, Socket>>
     // Only session-scoped clients (CLI) register handlers, only user-scoped clients (mobile) call them
@@ -1232,7 +1216,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             return;
         }
 
-        const verified = await tokenVerifier.verify(token);
+        const verified = await auth.verifyToken(token);
         if (!verified) {
             log({ module: 'websocket' }, `Invalid token provided`);
             socket.emit('error', { message: 'Invalid authentication token' });
@@ -1240,7 +1224,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             return;
         }
 
-        const userId = verified.user as string;
+        const userId = verified.userId;
         log({ module: 'websocket' }, `Token verified: ${userId}, clientType: ${clientType || 'user-scoped'}, sessionId: ${sessionId || 'none'}, machineId: ${machineId || 'none'}, socketId: ${socket.id}`);
 
         // Store connection based on type
@@ -1267,23 +1251,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                 userId
             };
         }
-        if (!userIdToClientConnections.has(userId)) {
-            userIdToClientConnections.set(userId, new Set());
-        }
-        userIdToClientConnections.get(userId)!.add(connection);
+        eventRouter.addConnection(userId, connection);
+        incrementWebSocketConnection(connection.connectionType);
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
             // Broadcast daemon online
-            emitUpdateToInterestedClients({
-                event: 'ephemeral',
+            const machineActivity = buildMachineActivityEphemeral(machineId!, true, Date.now());
+            eventRouter.emitEphemeral({
                 userId,
-                payload: {
-                    type: 'machine-activity',
-                    id: machineId,
-                    active: true,
-                    activeAt: Date.now()
-                },
+                payload: machineActivity,
                 recipientFilter: { type: 'user-scoped-only' }
             });
         }
@@ -1293,14 +1270,11 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         const receiveUsageLock = new AsyncLock();
 
         socket.on('disconnect', () => {
-            // Cleanup
-            const connections = userIdToClientConnections.get(userId);
-            if (connections) {
-                connections.delete(connection);
-                if (connections.size === 0) {
-                    userIdToClientConnections.delete(userId);
-                }
-            }
+            websocketEventsCounter.inc({ event_type: 'disconnect' });
+
+            // Cleanup connections
+            eventRouter.removeConnection(userId, connection);
+            decrementWebSocketConnection(connection.connectionType);
 
             // Clean up RPC listeners for this socket
             const userRpcMap = rpcListeners.get(userId);
@@ -1328,15 +1302,10 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
             // Broadcast daemon offline status
             if (connection.connectionType === 'machine-scoped') {
-                emitUpdateToInterestedClients({
-                    event: 'ephemeral',
+                const machineActivity = buildMachineActivityEphemeral(connection.machineId, false, Date.now());
+                eventRouter.emitEphemeral({
                     userId,
-                    payload: {
-                        type: 'machine-activity',
-                        id: connection.machineId,
-                        active: false,
-                        activeAt: Date.now()
-                    },
+                    payload: machineActivity,
                     recipientFilter: { type: 'user-scoped-only' }
                 });
             }
@@ -1348,6 +1317,10 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             thinking?: boolean;
         }) => {
             try {
+                // Track metrics
+                websocketEventsCounter.inc({ event_type: 'session-alive' });
+                sessionAliveEventsCounter.inc();
+
                 // Basic validation
                 if (!data || typeof data.time !== 'number' || !data.sid) {
                     return;
@@ -1363,31 +1336,20 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
                 const { sid, thinking } = data;
 
-                // Resolve session
-                const session = await db.session.findUnique({
-                    where: { id: sid, accountId: userId }
-                });
-                if (!session) {
+                // Check session validity using cache
+                const isValid = await activityCache.isSessionValid(sid, userId);
+                if (!isValid) {
                     return;
                 }
 
-                // Update last active
-                await db.session.update({
-                    where: { id: sid },
-                    data: { lastActiveAt: new Date(t), active: true }
-                });
+                // Queue database update (will only update if time difference is significant)
+                activityCache.queueSessionUpdate(sid, t);
 
-                // Emit update
-                emitUpdateToInterestedClients({
-                    event: 'ephemeral',
+                // Emit session activity update
+                const sessionActivity = buildSessionActivityEphemeral(sid, true, t, thinking || false);
+                eventRouter.emitEphemeral({
                     userId,
-                    payload: {
-                        type: 'activity',
-                        id: sid,
-                        active: true,
-                        activeAt: t,
-                        thinking: thinking || false
-                    },
+                    payload: sessionActivity,
                     recipientFilter: { type: 'all-user-authenticated-connections' }
                 });
             } catch (error) {
@@ -1400,6 +1362,10 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             time: number;
         }) => {
             try {
+                // Track metrics
+                websocketEventsCounter.inc({ event_type: 'machine-alive' });
+                machineAliveEventsCounter.inc();
+
                 // Basic validation
                 if (!data || typeof data.time !== 'number' || !data.machineId) {
                     return;
@@ -1413,43 +1379,19 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     return;
                 }
 
-                // Resolve machine
-                const machine = await db.machine.findUnique({
-                    where: {
-                        accountId_id: {
-                            accountId: userId,
-                            id: data.machineId
-                        }
-                    }
-                });
-
-                if (!machine) {
+                // Check machine validity using cache
+                const isValid = await activityCache.isMachineValid(data.machineId, userId);
+                if (!isValid) {
                     return;
                 }
 
-                // Update machine lastActiveAt in database
-                const updatedMachine = await db.machine.update({
-                    where: {
-                        accountId_id: {
-                            accountId: userId,
-                            id: data.machineId
-                        }
-                    },
-                    data: {
-                        lastActiveAt: new Date(t),
-                        active: true
-                    }
-                })
+                // Queue database update (will only update if time difference is significant)
+                activityCache.queueMachineUpdate(data.machineId, t);
 
-                emitUpdateToInterestedClients({
-                    event: 'ephemeral',
+                const machineActivity = buildMachineActivityEphemeral(data.machineId, true, t);
+                eventRouter.emitEphemeral({
                     userId,
-                    payload: {
-                        type: 'machine-activity',
-                        id: updatedMachine.id,
-                        active: true,
-                        activeAt: t,
-                    },
+                    payload: machineActivity,
                     recipientFilter: { type: 'user-scoped-only' }
                 });
             } catch (error) {
@@ -1488,17 +1430,11 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     data: { lastActiveAt: new Date(t), active: false }
                 });
 
-                // Emit update to connected sockets
-                emitUpdateToInterestedClients({
-                    event: 'ephemeral',
+                // Emit session activity update
+                const sessionActivity = buildSessionActivityEphemeral(sid, false, t, false);
+                eventRouter.emitEphemeral({
                     userId,
-                    payload: {
-                        type: 'activity',
-                        id: sid,
-                        active: false,
-                        activeAt: t,
-                        thinking: false
-                    },
+                    payload: sessionActivity,
                     recipientFilter: { type: 'all-user-authenticated-connections' }
                 });
             } catch (error) {
@@ -1509,6 +1445,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         socket.on('message', async (data: any) => {
             await receiveMessageLock.inLock(async () => {
                 try {
+                    websocketEventsCounter.inc({ event_type: 'message' });
                     const { sid, message, localId } = data;
 
                     log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}`);
@@ -1552,30 +1489,11 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                         }
                     });
 
-                    // Create update
-                    const update: PrismaJson.UpdateBody = {
-                        t: 'new-message',
-                        sid: sid,
-                        message: {
-                            id: msg.id,
-                            seq: msg.seq,
-                            content: msgContent,
-                            localId: useLocalId,
-                            createdAt: msg.createdAt.getTime(),
-                            updatedAt: msg.updatedAt.getTime()
-                        }
-                    };
-
-                    // Emit update to relevant clients
-                    emitUpdateToInterestedClients({
-                        event: 'update',
+                    // Emit new message update to relevant clients
+                    const updatePayload = buildNewMessageUpdate(msg, sid, updSeq, randomKeyNaked(12));
+                    eventRouter.emitUpdate({
                         userId,
-                        payload: {
-                            id: randomKeyNaked(12),
-                            seq: updSeq,
-                            body: update,
-                            createdAt: Date.now()
-                        },
+                        payload: updatePayload,
                         recipientFilter: { type: 'all-interested-in-session', sessionId: sid },
                         skipSenderConnection: connection
                     });
@@ -1624,25 +1542,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     return null;
                 }
 
-                // Generate update
+                // Generate session metadata update
                 const updSeq = await allocateUserSeq(userId);
-                const updContent: PrismaJson.UpdateBody = {
-                    t: 'update-session',
-                    id: sid,
-                    metadata: {
-                        value: metadata,
-                        version: expectedVersion + 1
-                    }
+                const metadataUpdate = {
+                    value: metadata,
+                    version: expectedVersion + 1
                 };
-                emitUpdateToInterestedClients({
-                    event: 'update',
+                const updatePayload = buildUpdateSessionUpdate(sid, updSeq, randomKeyNaked(12), metadataUpdate);
+                eventRouter.emitUpdate({
                     userId,
-                    payload: {
-                        id: randomKeyNaked(12),
-                        seq: updSeq,
-                        body: updContent,
-                        createdAt: Date.now()
-                    },
+                    payload: updatePayload,
                     recipientFilter: { type: 'all-interested-in-session', sessionId: sid }
                 });
 
@@ -1699,27 +1608,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     return null;
                 }
 
-                // Generate update
+                // Generate session agent state update
                 const updSeq = await allocateUserSeq(userId);
-                const updContent: PrismaJson.UpdateBody = {
-                    t: 'update-session',
-                    id: sid,
-                    agentState: {
-                        value: agentState,
-                        version: expectedVersion + 1
-                    }
+                const agentStateUpdate = {
+                    value: agentState,
+                    version: expectedVersion + 1
                 };
-
-                // Emit update to connected sockets
-                emitUpdateToInterestedClients({
-                    event: 'update',
+                const updatePayload = buildUpdateSessionUpdate(sid, updSeq, randomKeyNaked(12), undefined, agentStateUpdate);
+                eventRouter.emitUpdate({
                     userId,
-                    payload: {
-                        id: randomKeyNaked(12),
-                        seq: updSeq,
-                        body: updContent,
-                        createdAt: Date.now()
-                    },
+                    payload: updatePayload,
                     recipientFilter: { type: 'all-interested-in-session', sessionId: sid }
                 });
 
@@ -1800,27 +1698,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     return;
                 }
 
-                // Generate update
+                // Generate machine metadata update
                 const updSeq = await allocateUserSeq(userId);
-                const updContent: PrismaJson.UpdateBody = {
-                    t: 'update-machine',
-                    machineId: machineId,
-                    metadata: {
-                        value: metadata,
-                        version: expectedVersion + 1
-                    }
+                const metadataUpdate = {
+                    value: metadata,
+                    version: expectedVersion + 1
                 };
-
-                // Emit to all connections
-                emitUpdateToInterestedClients({
-                    event: 'update',
+                const updatePayload = buildUpdateMachineUpdate(machineId, updSeq, randomKeyNaked(12), metadataUpdate);
+                eventRouter.emitUpdate({
                     userId,
-                    payload: {
-                        id: randomKeyNaked(12),
-                        seq: updSeq,
-                        body: updContent,
-                        createdAt: Date.now()
-                    },
+                    payload: updatePayload,
                     recipientFilter: { type: 'all-user-authenticated-connections' }
                 });
 
@@ -1906,27 +1793,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     return;
                 }
 
-                // Generate update
+                // Generate machine daemon state update
                 const updSeq = await allocateUserSeq(userId);
-                const updContent: PrismaJson.UpdateBody = {
-                    t: 'update-machine',
-                    machineId: machineId,
-                    daemonState: {
-                        value: daemonState,
-                        version: expectedVersion + 1
-                    }
+                const daemonStateUpdate = {
+                    value: daemonState,
+                    version: expectedVersion + 1
                 };
-
-                // Emit to all connections
-                emitUpdateToInterestedClients({
-                    event: 'update',
+                const updatePayload = buildUpdateMachineUpdate(machineId, updSeq, randomKeyNaked(12), undefined, daemonStateUpdate);
+                eventRouter.emitUpdate({
                     userId,
-                    payload: {
-                        id: randomKeyNaked(12),
-                        seq: updSeq,
-                        body: updContent,
-                        createdAt: Date.now()
-                    },
+                    payload: updatePayload,
                     recipientFilter: { type: 'all-user-authenticated-connections' }
                 });
 
@@ -2201,19 +2077,12 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
                         log({ module: 'websocket' }, `Usage report saved: key=${key}, sessionId=${sessionId || 'none'}, userId=${userId}`);
 
-                        // Emit ephemeral update if sessionId is provided
+                        // Emit usage ephemeral update if sessionId is provided
                         if (sessionId) {
-                            emitUpdateToInterestedClients({
-                                event: 'ephemeral',
+                            const usageEvent = buildUsageEphemeral(sessionId, key, usageData.tokens, usageData.cost);
+                            eventRouter.emitEphemeral({
                                 userId,
-                                payload: {
-                                    type: 'usage',
-                                    id: sessionId,
-                                    key,
-                                    tokens: usageData.tokens,
-                                    cost: usageData.cost,
-                                    timestamp: Date.now()
-                                },
+                                payload: usageEvent,
                                 recipientFilter: { type: 'user-scoped-only' }
                             });
                         }
