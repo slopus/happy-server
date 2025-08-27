@@ -1237,6 +1237,17 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                 userId,
                 sessionId
             };
+            // Update session connectivity to ONLINE when CLI connects
+            await db.session.update({
+                where: { id: sessionId, accountId: userId },
+                data: {
+                    connectivityStatus: 'online',
+                    connectivityStatusSince: new Date(),
+                    connectivityStatusReason: 'Socket connected'
+                }
+            }).catch(err => {
+                log({ module: 'websocket', level: 'error' }, `Failed to update session connectivity on connect: ${err}`);
+            });
         } else if (metadata.clientType === 'machine-scoped' && machineId) {
             connection = {
                 connectionType: 'machine-scoped',
@@ -1244,6 +1255,22 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                 userId,
                 machineId
             };
+            // Update machine connectivity to ONLINE when daemon connects
+            await db.machine.update({
+                where: {
+                    accountId_id: {
+                        accountId: userId,
+                        id: machineId
+                    }
+                },
+                data: {
+                    connectivityStatus: 'online',
+                    connectivityStatusSince: new Date(),
+                    connectivityStatusReason: 'Daemon connected'
+                }
+            }).catch(err => {
+                log({ module: 'websocket', level: 'error' }, `Failed to update machine connectivity on connect: ${err}`);
+            });
         } else {
             connection = {
                 connectionType: 'user-scoped',
@@ -1269,8 +1296,38 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         const receiveMessageLock = new AsyncLock();
         const receiveUsageLock = new AsyncLock();
 
-        socket.on('disconnect', () => {
+        socket.on('disconnect', async () => {
             websocketEventsCounter.inc({ event_type: 'disconnect' });
+
+            // Update connectivity status to OFFLINE on disconnect
+            if (connection.connectionType === 'session-scoped' && connection.sessionId) {
+                await db.session.update({
+                    where: { id: connection.sessionId, accountId: userId },
+                    data: {
+                        connectivityStatus: 'offline',
+                        connectivityStatusSince: new Date(),
+                        connectivityStatusReason: 'Socket disconnected'
+                    }
+                }).catch(err => {
+                    log({ module: 'websocket', level: 'error' }, `Failed to update session connectivity on disconnect: ${err}`);
+                });
+            } else if (connection.connectionType === 'machine-scoped' && connection.machineId) {
+                await db.machine.update({
+                    where: {
+                        accountId_id: {
+                            accountId: userId,
+                            id: connection.machineId
+                        }
+                    },
+                    data: {
+                        connectivityStatus: 'offline',
+                        connectivityStatusSince: new Date(),
+                        connectivityStatusReason: 'Daemon disconnected'
+                    }
+                }).catch(err => {
+                    log({ module: 'websocket', level: 'error' }, `Failed to update machine connectivity on disconnect: ${err}`);
+                });
+            }
 
             // Cleanup connections
             eventRouter.removeConnection(userId, connection);
@@ -1424,10 +1481,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     return;
                 }
 
-                // Update last active at
+                // Update last active at and connectivity
                 await db.session.update({
                     where: { id: sid },
-                    data: { lastActiveAt: new Date(t), active: false }
+                    data: { 
+                        lastActiveAt: new Date(t), 
+                        active: false,
+                        connectivityStatus: 'offline',
+                        connectivityStatusSince: new Date(t),
+                        connectivityStatusReason: 'Session ended'
+                    }
                 });
 
                 // Emit session activity update

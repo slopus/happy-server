@@ -20,9 +20,15 @@ datasource db {
 //
 
 enum ConnectivityStatus {
-    never_connected
-    online
-    offline
+    NEVER_CONNECTED
+    ONLINE
+    OFFLINE
+}
+
+enum SessionLifecycle {
+    ACTIVE
+    ARCHIVE_REQUESTED
+    ARCHIVED
 }
 //
 // Account
@@ -93,7 +99,7 @@ model Session {
     lastActiveAt            DateTime            @default(now())
     
     // Connectivity tracking
-    connectivityStatus      ConnectivityStatus  @default(never_connected)
+    connectivityStatus      ConnectivityStatus  @default(NEVER_CONNECTED)
     connectivityStatusSince DateTime            @default(now())
     connectivityStatusReason String             @default("")
     
@@ -185,7 +191,7 @@ model Machine {
     lastActiveAt            DateTime            @default(now())
     
     // Connectivity tracking
-    connectivityStatus      ConnectivityStatus  @default(never_connected)
+    connectivityStatus      ConnectivityStatus  @default(NEVER_CONNECTED)
     connectivityStatusSince DateTime            @default(now())
     connectivityStatusReason String             @default("")
     
