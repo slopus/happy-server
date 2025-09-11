@@ -1,7 +1,6 @@
 services:
   happy-server:
-    build:
-      context: .
+    build: .
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -9,7 +8,7 @@ services:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/happy-server
       - REDIS_URL=redis://redis:6379
-      - SEED=your-seed-for-token-generation
+      - HANDY_MASTER_SECRET=your-seed-for-token-generation
       - PORT=3000
       - S3_HOST=minio
       - S3_PORT=9000
@@ -19,9 +18,23 @@ services:
       - S3_BUCKET=happy
       - S3_PUBLIC_URL=http://minio:9000/happy
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    build: .
+    command: yarn prisma migrate deploy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/happy-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./prisma:/app/prisma
  
   postgres:
     image: postgres:15
