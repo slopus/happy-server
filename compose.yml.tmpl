@@ -44,8 +44,6 @@ services:
       - POSTGRES_PASSWORD=postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -54,8 +52,6 @@ services:
  
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379"
     volumes:
       - redis_data:/data
  
@@ -63,7 +59,6 @@ services:
     image: minio/minio
     command: server /data --console-address ":9001"
     ports:
-      - "9000"
       # Include if you want to access the admin console
       #- "9001:9001"
     environment:
