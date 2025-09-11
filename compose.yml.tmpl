@@ -58,9 +58,9 @@ services:
   minio:
     image: minio/minio
     command: server /data --console-address ":9001"
-    ports:
-      # Include if you want to access the admin console
-      #- "9001:9001"
+    # Include if you want to access the admin console
+    # ports:
+      # - "9001:9001"
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin

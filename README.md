@@ -28,7 +28,7 @@ Your Claude Code clients generate encryption keys locally and use Happy Server a
 
 That said, Happy Server is open source and self-hostable if you prefer running your own infrastructure. The security model is identical whether you use our servers or your own.
 
-**If you still want to self-host:** An easy way to self-host `happy-server` is by copying the `compose.yml.tmpl` to `compose.yml` and add a random `HANDY_MASTER_SECRET`. A `docker compose up -d` afterwards and you have a running server greeting you on port `3000`. For a more sophisticated server with a reverse proxy and SSL, please check our docs.
+**If you still want to self-host:** An easy way to self-host `happy-server` is by copying `compose.yml.tmpl` to `compose.yml` and adding a random `HANDY_MASTER_SECRET`. Run `docker compose up -d` afterward, and you'll have a running server accessible on port `3000`. For a more sophisticated setup with a reverse proxy and SSL, please refer to our [self-hosting guide](https://happy.engineering/docs/guides/self-hosting/).
 
 ## License
 
