@@ -34,13 +34,12 @@ export function buildUserProfile(
 
     let avatar: UserProfile['avatar'] = null;
     if (avatarJson) {
-        const avatarData = avatarJson;
         avatar = {
-            path: avatarData.path,
-            url: getPublicUrl(avatarData.path),
-            width: avatarData.width,
-            height: avatarData.height,
-            thumbhash: avatarData.thumbhash
+            path: avatarJson.path || '',
+            url: getPublicUrl(avatarJson),
+            width: avatarJson.width,
+            height: avatarJson.height,
+            thumbhash: avatarJson.thumbhash
         };
     }
 

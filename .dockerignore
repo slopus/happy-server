@@ -1,0 +1,11 @@
+node_modules
+.env
+.env.local
+dist
+
+# SQLite database
+*.db
+*.db-journal
+
+.logs/
+.claude/

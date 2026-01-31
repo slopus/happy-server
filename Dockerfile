@@ -37,9 +37,11 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/sources ./sources
+COPY --from=builder /app/prisma ./prisma
 
 # Expose the port the app will run on
 EXPOSE 3000
 
 # Command to run the application
-CMD ["yarn", "start"] 
+# prisma db push creates tables if they don't exist (idempotent)
+CMD ["sh", "-c", "npx prisma db push --skip-generate && yarn start"] 

@@ -1,24 +1,24 @@
 import { db } from "@/storage/db";
 import { Context } from "@/context";
 import { encryptString } from "@/modules/encrypt";
-import { uploadImage } from "@/storage/uploadImage";
 import { separateName } from "@/utils/separateName";
 import { GitHubProfile } from "@/app/api/types";
 import { allocateUserSeq } from "@/storage/seq";
 import { buildUpdateAccountUpdate, eventRouter } from "@/app/events/eventRouter";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { githubDisconnect } from "./githubDisconnect";
+import { ImageRef } from "@/storage/files";
 
 /**
  * Connects a GitHub account to a user profile.
- * 
+ *
  * Flow:
  * 1. Check if already connected to same account - early exit if yes
  * 2. If GitHub account is connected to another user - disconnect it first
- * 3. Upload avatar to S3 (non-transactional operation)
+ * 3. Store GitHub avatar URL directly (no re-hosting)
  * 4. In transaction: persist GitHub account and link to user with GitHub username
  * 5. Send socket update after transaction completes
- * 
+ *
  * @param ctx - Request context containing user ID
  * @param githubProfile - GitHub profile data from OAuth
  * @param accessToken - GitHub access token for API access
@@ -52,10 +52,10 @@ export async function githubConnect(
         await githubDisconnect(disconnectCtx);
     }
 
-    // Step 3: Upload avatar to S3 (outside transaction for performance)
-    const imageResponse = await fetch(githubProfile.avatar_url);
-    const imageBuffer = await imageResponse.arrayBuffer();
-    const avatar = await uploadImage(userId, 'avatars', 'github', githubProfile.avatar_url, Buffer.from(imageBuffer));
+    // Step 3: Use GitHub avatar URL directly (no re-hosting needed)
+    const avatar: ImageRef = {
+        url: githubProfile.avatar_url
+    };
 
     // Extract name from GitHub profile
     const name = separateName(githubProfile.name);

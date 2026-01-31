@@ -3,7 +3,7 @@
 
 generator client {
     provider        = "prisma-client-js"
-    previewFeatures = ["metrics", "relationJoins"]
+    previewFeatures = ["metrics"]
 }
 
 generator json {
@@ -11,7 +11,7 @@ generator json {
 }
 
 datasource db {
-    provider = "postgresql"
+    provider = "sqlite"
     url      = env("DATABASE_URL")
 }
 
@@ -110,7 +110,7 @@ model Session {
     accessKeys        AccessKey[]
 
     @@unique([accountId, tag])
-    @@index([accountId, updatedAt(sort: Desc)])
+    @@index([accountId, updatedAt])
 }
 
 model SessionMessage {
@@ -270,7 +270,7 @@ model Artifact {
     updatedAt         DateTime @updatedAt
 
     @@index([accountId])
-    @@index([accountId, updatedAt(sort: Desc)])
+    @@index([accountId, updatedAt])
 }
 
 //
@@ -341,7 +341,7 @@ model UserFeedItem {
 
     @@unique([userId, counter])
     @@unique([userId, repeatKey])
-    @@index([userId, counter(sort: Desc)])
+    @@index([userId, counter])
 }
 
 //

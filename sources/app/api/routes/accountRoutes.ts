@@ -30,7 +30,7 @@ export function accountRoutes(app: Fastify) {
             firstName: user.firstName,
             lastName: user.lastName,
             username: user.username,
-            avatar: user.avatar ? { ...user.avatar, url: getPublicUrl(user.avatar.path) } : null,
+            avatar: user.avatar ? { ...user.avatar, url: getPublicUrl(user.avatar) } : null,
             github: user.githubUser ? user.githubUser.profile : null,
             connectedServices: Array.from(connectedVendors)
         });

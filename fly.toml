@@ -1,0 +1,38 @@
+# fly.toml app configuration file generated for happy-server-billowing-dawn-6678 on 2026-01-31T10:58:39Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'happy-server-billowing-dawn-6678'
+primary_region = 'lhr'
+
+[build]
+
+[env]
+  DATABASE_URL = 'file:/data/happy.db'
+  METRICS_ENABLED = 'false'
+  NODE_ENV = 'production'
+  PORT = '3000'
+
+[[mounts]]
+  source = 'happy_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 250
+    soft_limit = 200
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 512

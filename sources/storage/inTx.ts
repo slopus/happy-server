@@ -21,7 +21,7 @@ export async function inTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
     }
     while (true) {
         try {
-            let result = await db.$transaction(wrapped, { isolationLevel: 'Serializable', timeout: 10000 });
+            let result = await db.$transaction(wrapped, { timeout: 10000 });
             for (let callback of result.callbacks) {
                 try {
                     callback();

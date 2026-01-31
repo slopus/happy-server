@@ -75,11 +75,11 @@ export async function userRoutes(app: Fastify) {
         const { query } = request.query;
 
         // Search for users by username, first 10 matches
+        // Note: SQLite doesn't support case-insensitive mode, using case-sensitive search
         const users = await db.account.findMany({
             where: {
                 username: {
-                    startsWith: query,
-                    mode: 'insensitive'
+                    startsWith: query
                 }
             },
             include: {
