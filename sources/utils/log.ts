@@ -39,9 +39,9 @@ transports.push({
     target: 'pino-pretty',
     options: {
         colorize: true,
-        translateTime: 'HH:MM:ss.l',
-        ignore: 'pid,hostname',
-        messageFormat: '{levelLabel} {msg} | [{time}]',
+        translateTime: 'SYS:HH:MM:ss.l',  // SYS: prefix = local time
+        ignore: 'pid,hostname,module,localTime',
+        messageFormat: '[{module}] {msg}',
         errorLikeObjectKeys: ['err', 'error'],
     },
 });
@@ -65,9 +65,9 @@ export const logger = pino({
     },
     formatters: {
         log: (object: any) => {
-            // Add localTime to every log entry
             return {
                 ...object,
+                module: object.module || 'server',
                 localTime: formatLocalTime(typeof object.time === 'number' ? object.time : undefined),
             };
         }

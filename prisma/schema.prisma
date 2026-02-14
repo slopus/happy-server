@@ -38,6 +38,11 @@ model Account {
     /// [ImageRef]
     avatar    Json?
 
+    // Voice conversation tracking for free trial
+    voiceConversationCount             Int  @default(0)
+    // Set this to expand certain user's free trial limit beyond the default (VOICE_FREE_TRIAL_LIMIT env var)
+    voiceConversationFreeLimitOverride Int?
+
     Session             Session[]
     AccountPushToken    AccountPushToken[]
     TerminalAuthRequest TerminalAuthRequest[]

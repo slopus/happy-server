@@ -1,0 +1,65 @@
+# Local development dependencies
+# Usage: docker compose up -d
+# Then: yarn dev
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: happy-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: happy
+      POSTGRES_PASSWORD: localdevpassword
+      POSTGRES_DB: happy
+    volumes:
+      - ./.pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U happy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: happy-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: happy-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: happyaccesskey
+      MINIO_ROOT_PASSWORD: happysecretkey123
+    volumes:
+      - ./.minio:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Create the default bucket on startup
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 happyaccesskey happysecretkey123;
+      mc mb myminio/happy-files --ignore-existing;
+      mc anonymous set download myminio/happy-files;
+      exit 0;
+      "
