@@ -11,6 +11,8 @@ import { startDatabaseMetricsUpdater } from "@/app/monitoring/metrics2";
 import { initEncrypt } from "./modules/encrypt";
 import { initGithub } from "./modules/github";
 import { loadFiles } from "./storage/files";
+import { startWapSync, stopWapSync } from "./app/wap/wapSync";
+import { startWapEventListener, stopWapEventListener } from "./app/wap/wapEventListener";
 
 async function main() {
 
@@ -38,6 +40,14 @@ async function main() {
     await startMetricsServer();
     startDatabaseMetricsUpdater();
     startTimeout();
+
+    // WAP container orchestration services
+    startWapSync({ containerIntervalMs: 30_000, templateIntervalMs: 300_000 });
+    startWapEventListener();
+    onShutdown('wap', async () => {
+        stopWapSync();
+        stopWapEventListener();
+    });
 
     //
     // Ready

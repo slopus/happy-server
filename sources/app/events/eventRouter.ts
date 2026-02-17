@@ -152,6 +152,108 @@ export type UpdateEvent = {
         value: string | null; // null indicates deletion
         version: number; // -1 for deleted keys
     }>;
+} | {
+    type: 'new-project';
+    id: string;
+    accountId: string;
+    parentId: string | null;
+    path: string;
+    depth: number;
+    name: string;
+    description: string | null;
+    metadata: unknown;
+    sortOrder: number;
+    createdAt: number;
+    updatedAt: number;
+} | {
+    type: 'update-project';
+    id: string;
+    name?: string;
+    description?: string | null;
+    metadata?: unknown;
+    sortOrder?: number;
+} | {
+    type: 'move-project';
+    id: string;
+    parentId: string | null;
+} | {
+    type: 'delete-project';
+    projectId: string;
+} | {
+    type: 'new-room';
+    id: string;
+    accountId: string;
+    projectId: string;
+    name: string;
+    description: string | null;
+    metadata: unknown;
+    status: string;
+    createdAt: number;
+    updatedAt: number;
+} | {
+    type: 'update-room';
+    id: string;
+    projectId: string;
+    name?: string;
+    description?: string | null;
+    metadata?: unknown;
+    status?: string;
+} | {
+    type: 'delete-room';
+    roomId: string;
+    projectId: string;
+} | {
+    type: 'new-container-launch';
+    launchId: string;
+    name: string;
+    image: string;
+    status: string;
+    containerType: string;
+    agentType: string | null;
+    projectRole: string | null;
+    agentVersion: string | null;
+    projectId: string | null;
+    wapContainerId: string | null;
+    machineId: string | null;
+    createdAt: number;
+} | {
+    type: 'container-status';
+    launchId: string;
+    status: string;
+    statusMessage: string | null;
+    wapContainerId: string | null;
+    machineId: string | null;
+    lastSeenAt: number | null;
+} | {
+    type: 'delete-container-launch';
+    launchId: string;
+} | {
+    type: 'container-room-assigned';
+    launchId: string;
+    roomId: string;
+    role: string;
+} | {
+    type: 'container-room-removed';
+    launchId: string;
+    roomId: string;
+} | {
+    type: 'new-room-message';
+    messageId: string;
+    roomId: string;
+    accountId: string;
+    content: string;
+    messageType: string;
+    metadata: unknown;
+    createdAt: number;
+} | {
+    type: 'new-project-note';
+    noteId: string;
+    projectId: string;
+    sourceAgentType: string;
+    targetAgentType: string;
+    title: string;
+    status: string;
+    createdAt: number;
 };
 
 // === EPHEMERAL EVENT TYPES (Transient) ===
@@ -178,6 +280,12 @@ export type EphemeralEvent = {
     type: 'machine-status';
     machineId: string;
     online: boolean;
+    timestamp: number;
+} | {
+    type: 'container-activity';
+    launchId: string;
+    machineId: string | null;
+    active: boolean;
     timestamp: number;
 };
 

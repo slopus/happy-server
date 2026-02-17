@@ -20,16 +20,21 @@ datasource db {
 //
 
 model Account {
-    id              String      @id @default(cuid())
-    publicKey       String      @unique
-    seq             Int         @default(0)
-    feedSeq         BigInt      @default(0)
-    createdAt       DateTime    @default(now())
-    updatedAt       DateTime    @updatedAt
-    settings        String?
-    settingsVersion Int         @default(0)
-    githubUserId    String?     @unique
-    githubUser      GithubUser? @relation(fields: [githubUserId], references: [id])
+    id                 String      @id @default(cuid())
+    publicKey          String      @unique
+    seq                Int         @default(0)
+    feedSeq            BigInt      @default(0)
+    createdAt          DateTime    @default(now())
+    updatedAt          DateTime    @updatedAt
+    settings           String?
+    settingsVersion    Int         @default(0)
+    githubUserId       String?     @unique
+    githubUser         GithubUser? @relation(fields: [githubUserId], references: [id])
+
+    // SuperTokens authentication
+    supertokensUserId  String?     @unique
+    email              String?
+    authProvider       String?     // 'google', 'emailpassword', 'github'
 
     // Profile
     firstName String?
@@ -52,6 +57,12 @@ model Account {
     AccessKey           AccessKey[]
     UserFeedItem        UserFeedItem[]
     UserKVStore         UserKVStore[]
+    Project             Project[]
+    Room                Room[]
+    MachineToken        MachineToken[]
+    ContainerLaunch     ContainerLaunch[]
+    RoomMessage         RoomMessage[]
+    ProjectNote         ProjectNote[]
 }
 
 model TerminalAuthRequest {
@@ -108,6 +119,7 @@ model Session {
     messages          SessionMessage[]
     usageReports      UsageReport[]
     accessKeys        AccessKey[]
+    roomSessions      RoomSession[]
 
     @@unique([accountId, tag])
     @@index([accountId, updatedAt(sort: Desc)])
@@ -360,4 +372,246 @@ model UserKVStore {
 
     @@unique([accountId, key])
     @@index([accountId])
+}
+
+//
+// Projects & Rooms
+//
+
+model Project {
+    id          String    @id @default(cuid())
+    accountId   String
+    account     Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    // Tree structure (materialized path)
+    parentId    String?
+    parent      Project?  @relation("ProjectHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+    children    Project[] @relation("ProjectHierarchy")
+    path        String    @default("/")   // "/rootId/childId/grandchildId/"
+    depth       Int       @default(0)
+
+    // Metadata
+    name        String
+    description String?
+    /// [ProjectMetadata]
+    metadata    Json?
+    sortOrder   Int       @default(0)
+
+    createdAt       DateTime          @default(now())
+    updatedAt       DateTime          @updatedAt
+
+    rooms           Room[]
+    ContainerLaunch ContainerLaunch[]
+    projectNotes    ProjectNote[]
+
+    @@unique([accountId, parentId, name])
+    @@index([accountId, path])
+    @@index([accountId])
+}
+
+model Room {
+    id          String     @id @default(cuid())
+    accountId   String
+    account     Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    projectId   String
+    project     Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+    name        String
+    description String?
+    /// [RoomMetadata]
+    metadata    Json?      // Future: workspace config, shared resources
+    status      RoomStatus @default(active)
+
+    createdAt      DateTime        @default(now())
+    updatedAt      DateTime        @updatedAt
+
+    roomSessions   RoomSession[]
+    roomContainers RoomContainer[]
+    messages       RoomMessage[]
+
+    @@unique([projectId, name])
+    @@index([accountId])
+    @@index([projectId])
+}
+
+model RoomSession {
+    id          String          @id @default(cuid())
+    roomId      String
+    room        Room            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+    sessionId   String
+    session     Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+    role        RoomSessionRole @default(member)
+    joinedAt    DateTime        @default(now())
+
+    @@unique([roomId, sessionId])
+    @@index([roomId])
+    @@index([sessionId])
+}
+
+enum RoomStatus {
+    active
+    archived
+    locked
+}
+
+enum RoomSessionRole {
+    primary
+    member
+    observer
+}
+
+//
+// Machine Tokens (for container/daemon authentication)
+//
+
+model MachineToken {
+    id              String            @id @default(cuid())
+    accountId       String
+    account         Account           @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    name            String    // User-friendly name: "My Docker Agent"
+    token           String    @unique // The bearer token value (mkt_...)
+    lastUsedAt      DateTime?
+    expiresAt       DateTime? // Optional expiration
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
+    ContainerLaunch ContainerLaunch[]
+
+    @@index([accountId])
+    @@index([token])
+}
+
+//
+// Container Launch Orchestration (WAP Integration)
+//
+
+enum ContainerStatus {
+    pending
+    creating
+    starting
+    running
+    stopping
+    stopped
+    removing
+    removed
+    failed
+    error
+    offline
+}
+
+model ContainerLaunch {
+    id              String          @id @default(cuid())
+    accountId       String
+    account         Account         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    name            String          // User-friendly name: "My Dev Agent"
+
+    // WAP / Docker identifiers
+    containerName   String?         // Docker container name (forge-<name>-<id>)
+    wapContainerId  String?         // WAP's container ID
+    image           String          // Docker image
+    tag             String          @default("latest")
+    config          Json            // Full container config (env, ports, volumes, resources, etc.)
+
+    // AI-Forge agent identity
+    containerType   String          @default("forge-agent")  // Identifies AI-Forge-compatible containers
+    agentType       String?         // claude-daemon, claude-flow-agent, dev-agent, custom
+    projectRole     String?         // Developer, reviewer, tester, orchestrator, etc.
+    agentVersion    String?         // Version string of the agent software
+
+    // Project association
+    projectId       String?
+    project         Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+    // Status
+    status          ContainerStatus @default(pending)
+    statusMessage   String?
+    lastSeenAt      DateTime?       // Last time WAP sync confirmed running
+
+    // Machine token + machine linkage
+    machineId       String?
+    machineTokenId  String?
+    machineToken    MachineToken?   @relation(fields: [machineTokenId], references: [id], onDelete: SetNull)
+
+    // Lifecycle timestamps
+    startedAt       DateTime?
+    stoppedAt       DateTime?
+    createdAt       DateTime        @default(now())
+    updatedAt       DateTime        @updatedAt
+
+    // Room associations
+    roomContainers  RoomContainer[]
+
+    @@index([accountId])
+    @@index([accountId, status])
+    @@index([accountId, projectId])
+    @@index([wapContainerId])
+    @@index([machineId])
+    @@index([containerType])
+}
+
+model RoomContainer {
+    id              String          @id @default(cuid())
+    roomId          String
+    room            Room            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+    containerId     String
+    container       ContainerLaunch @relation(fields: [containerId], references: [id], onDelete: Cascade)
+    role            RoomSessionRole @default(member)
+    assignedAt      DateTime        @default(now())
+
+    @@unique([roomId, containerId])
+    @@index([roomId])
+    @@index([containerId])
+}
+
+model RoomMessage {
+    id        String   @id @default(cuid())
+    roomId    String
+    room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+    accountId String
+    account   Account  @relation(fields: [accountId], references: [id])
+    content   String
+    type      String   @default("user")   // "user" | "assistant" | "system"
+    metadata  Json?
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([roomId, createdAt(sort: Desc)])
+    @@index([accountId])
+}
+
+model ProjectNote {
+    id              String   @id @default(cuid())
+    projectId       String
+    project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    accountId       String
+    account         Account  @relation(fields: [accountId], references: [id])
+    sourceAgentType String
+    targetAgentType String
+    title           String
+    content         String
+    status          String   @default("pending")  // "pending" | "acknowledged" | "completed"
+    metadata        Json?
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+
+    @@index([projectId, targetAgentType])
+    @@index([projectId, status])
+    @@index([accountId])
+}
+
+model WapTemplateCache {
+    id              String   @id @default(cuid())
+    wapTemplateId   String   @unique  // ID from WAP's application/template system
+    name            String
+    description     String?
+    image           String
+    tag             String   @default("latest")
+    config          Json     // Default container config from WAP
+    category        String?  // Grouping category
+    isForgeReady    Boolean  @default(false) // Pre-configured for ai-forge-client
+    lastSyncedAt    DateTime @default(now())
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+
+    @@index([isForgeReady])
+    @@index([category])
 }
