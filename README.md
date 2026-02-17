@@ -12,18 +12,35 @@ Happy Server is the synchronization backbone for secure Claude Code clients. It 
 ## Features
 
 - 🔐 **Zero Knowledge** - The server stores encrypted data but has no ability to decrypt it
-- 🎯 **Minimal Surface** - Only essential features for secure sync, nothing more  
+- 🎯 **Minimal Surface** - Only essential features for secure sync, nothing more
 - 🕵️ **Privacy First** - No analytics, no tracking, no data mining
 - 📖 **Open Source** - Transparent implementation you can audit and self-host
 - 🔑 **Cryptographic Auth** - No passwords stored, only public key signatures
 - ⚡ **Real-time Sync** - WebSocket-based synchronization across all your devices
 - 📱 **Multi-device** - Seamless session management across phones, tablets, and computers
+- 🤝 **Session Sharing** - Collaborate on conversations with granular access control
 - 🔔 **Push Notifications** - Notify when Claude Code finishes tasks or needs permissions (encrypted, we can't see the content)
 - 🌐 **Distributed Ready** - Built to scale horizontally when needed
 
 ## How It Works
 
 Your Claude Code clients generate encryption keys locally and use Happy Server as a secure relay. Messages are end-to-end encrypted before leaving your device. The server's job is simple: store encrypted blobs and sync them between your devices in real-time.
+
+### Session Sharing
+
+Happy Server supports secure collaboration through two sharing methods:
+
+**Direct Sharing**: Share sessions with specific users by username, with three access levels:
+- **View**: Read-only access to messages
+- **Edit**: Can send messages but cannot manage sharing
+- **Admin**: Full access including sharing management
+
+**Public Links**: Generate shareable URLs for broader access:
+- Always read-only for security
+- Optional expiration dates and usage limits
+- Consent-based access logging (IP/UA only logged with explicit consent)
+
+All sharing maintains end-to-end encryption - encrypted data keys are distributed to authorized users, and the server never sees unencrypted content.
 
 ## Hosting
 
